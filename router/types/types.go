@@ -45,12 +45,15 @@ func (r *Route) TCPRoute() *TCPRoute {
 }
 
 type HTTPRoute struct {
-	*Route  `json:"-"`
-	Domain  string `json:"domain,omitempty"`
-	Service string `json:"service,omitempty"`
-	TLSCert string `json:"tls_cert,omitempty"`
-	TLSKey  string `json:"tls_key,omitempty"`
-	Sticky  bool   `json:"sticky,omitempty"`
+	*Route    `json:"-"`
+	Domain    string            `json:"domain,omitempty"`
+	Service   string            `json:"service,omitempty"`
+	TLSCert   string            `json:"tls_cert,omitempty"`
+	TLSKey    string            `json:"tls_key,omitempty"`
+	Sticky    bool              `json:"sticky,omitempty"`
+	AuthType  string            `json:"auth_type,omitempty"`
+	HTTPAuth  map[string]string `json:"http_auth,omitempty"`
+	HTTPRealm string            `json:"http_realm,omitempty"`
 }
 
 func (r *HTTPRoute) ToRoute() *Route {
