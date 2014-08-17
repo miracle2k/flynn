@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/flynn/go-sql"
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/flynn/pq"
@@ -16,6 +15,7 @@ import (
 	ct "github.com/flynn/flynn/controller/types"
 	"github.com/flynn/flynn/host/types"
 	"github.com/flynn/flynn/pkg/cluster"
+	"github.com/flynn/flynn/pkg/sse"
 )
 
 type JobRepo struct {
@@ -164,13 +164,11 @@ type SSELogWriter interface {
 }
 
 func NewSSELogWriter(w io.Writer) SSELogWriter {
-	return &sseLogWriter{Writer: w, Encoder: json.NewEncoder(w)}
+	return &sseLogWriter{SSEWriter: &sse.Writer{Writer: w}}
 }
 
 type sseLogWriter struct {
-	io.Writer
-	*json.Encoder
-	sync.Mutex
+	sse.SSEWriter
 }
 
 func (w *sseLogWriter) Stream(s string) io.Writer {
@@ -188,21 +186,18 @@ type sseLogChunk struct {
 }
 
 func (w *sseLogStreamWriter) Write(p []byte) (int, error) {
-	w.w.Lock()
-	defer w.w.Unlock()
-
-	if _, err := w.w.Write([]byte("data: ")); err != nil {
+	str, err := json.Marshal(&sseLogChunk{Stream: w.s, Data: string(p)})
+	if err != nil {
 		return 0, err
 	}
-	if err := w.w.Encode(&sseLogChunk{Stream: w.s, Data: string(p)}); err != nil {
+	if _, err := w.w.Write(str); err != nil {
 		return 0, err
 	}
-	_, err := w.w.Write([]byte("\n"))
 	return len(p), err
 }
 
 func (w *sseLogStreamWriter) Flush() {
-	if fw, ok := w.w.Writer.(http.Flusher); ok {
+	if fw, ok := w.w.SSEWriter.(http.Flusher); ok {
 		fw.Flush()
 	}
 }
