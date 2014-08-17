@@ -20,6 +20,8 @@ type Listener interface {
 	AddRoute(*router.Route) error
 	SetRoute(*router.Route) error
 	RemoveRoute(id string) error
+	AddDrainListener(string, chan string)
+	RemoveDrainListener(string, chan string)
 	Watcher
 	DataStoreReader
 }
