@@ -25,22 +25,32 @@ Manage routes for application.
 Options:
    -t <type>                  route's type (Currently only http supported) [default: http]
    -s, --service <service>    service name to route domain to (defaults to APPNAME-web)
-   -c, --tls-cert <tls-cert>  path to PEM encoded certificate for TLS, - for stdin
-   -k, --tls-key <tls-key>    path to PEM encoded private key for TLS, - for stdin
-   --sticky                   enable cookie-based sticky routing
+   -c, --tls-cert <tls-cert>  path to PEM encoded certificate for TLS, - for stdin (http only)
+   -k, --tls-key <tls-key>    path to PEM encoded private key for TLS, - for stdin (http only)
+   --sticky                   enable cookie-based sticky routing (http only)
+
 Commands:
    With no arguments, shows a list of routes.
 
    add     adds a route to an app
    remove  removes a route
+
+Examples:
+
+   $ flynn add -t http example.com
+
+   $ flynn add -t tcp 4567
 `)
 }
 
 func runRoute(args *docopt.Args, client *controller.Client) error {
 	if args.Bool["add"] {
-		if args.String["-t"] == "http" {
+		switch args.String["-t"] {
+		case "http":
 			return runRouteAddHTTP(args, client)
-		} else {
+		case "tcp":
+			return runRouteAddTCP(args, client)
+		default:
 			return fmt.Errorf("Route type %s not supported.", args.String["-t"])
 		}
 	} else if args.Bool["remove"] {
@@ -74,6 +84,31 @@ func runRoute(args *docopt.Args, client *controller.Client) error {
 		}
 		listRec(w, protocol+":"+route, service, k.ID)
 	}
+	return nil
+}
+
+func runRouteAddTCP(args *docopt.Args, client *controller.Client) error {
+	var routeTCPService string
+	if args.String["--service"] == "" {
+		routeTCPService = mustApp() + "-web"
+	} else {
+		routeTCPService = args.String["--service"]
+	}
+
+	port, err := strconv.Atoi(args.String["<domain>"])
+	if err != nil {
+		return err
+	}
+
+	hr := &router.TCPRoute{
+		Service: routeTCPService,
+		Port:    port,
+	}
+	route := hr.ToRoute()
+	if err := client.CreateRoute(mustApp(), route); err != nil {
+		return err
+	}
+	fmt.Println(route.ID)
 	return nil
 }
 
