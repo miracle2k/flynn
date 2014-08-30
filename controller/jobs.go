@@ -7,8 +7,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/flynn/go-sql"
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/flynn/pq"
@@ -42,7 +44,7 @@ func (r *JobRepo) Add(job *ct.Job) error {
 	if err != nil {
 		return err
 	}
-	return nil
+	return r.db.Exec("INSERT INTO job_events (job_id, host_id, app_id, state) VALUES ($1, $2, $3, $4)", jobID, hostID, job.AppID, job.State)
 }
 
 func scanJob(s Scanner) (*ct.Job, error) {
@@ -76,13 +78,79 @@ func (r *JobRepo) List(appID string) ([]*ct.Job, error) {
 	return jobs, nil
 }
 
+func (r *JobRepo) listEvents(appID string, sinceID int64, previous int) ([]*ct.JobEvent, error) {
+	query := "SELECT event_id, concat(job_events.host_id, '-', job_events.job_id), job_events.app_id, job_cache.release_id, job_cache.process_type, job_events.state, job_events.created_at FROM job_events INNER JOIN job_cache ON job_events.job_id = job_cache.job_id AND job_events.host_id = job_cache.host_id WHERE job_events.app_id = $1 AND event_id > $2 ORDER BY event_id DESC"
+	args := []interface{}{appID, sinceID}
+	if previous > 0 {
+		query += " LIMIT $3"
+		args = append(args, previous)
+	}
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	events := []*ct.JobEvent{}
+	for rows.Next() {
+		event, err := scanJobEvent(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
+
+func (r *JobRepo) getEvent(eventID int64) (*ct.JobEvent, error) {
+	row := r.db.QueryRow("SELECT event_id, concat(job_events.host_id, '-', job_events.job_id), job_events.app_id, job_cache.release_id, job_cache.process_type, job_events.state, job_events.created_at FROM job_events INNER JOIN job_cache ON job_events.job_id = job_cache.job_id AND job_events.host_id = job_cache.host_id WHERE job_events.event_id = $1", eventID)
+	return scanJobEvent(row)
+}
+
+func scanJobEvent(s Scanner) (*ct.JobEvent, error) {
+	event := &ct.JobEvent{}
+	err := s.Scan(&event.ID, &event.JobID, &event.AppID, &event.ReleaseID, &event.Type, &event.State, &event.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			err = ErrNotFound
+		}
+		return nil, err
+	}
+	event.AppID = cleanUUID(event.AppID)
+	event.ReleaseID = cleanUUID(event.ReleaseID)
+	return event, nil
+}
+
 type clusterClient interface {
 	ListHosts() (map[string]host.Host, error)
 	DialHost(string) (cluster.Host, error)
 	AddJobs(*host.AddJobsReq) (*host.AddJobsRes, error)
 }
 
-func listJobs(app *ct.App, repo *JobRepo, r ResponseHelper) {
+func listJobs(req *http.Request, w http.ResponseWriter, app *ct.App, repo *JobRepo, r ResponseHelper) {
+	if strings.Contains(req.Header.Get("Accept"), "text/event-stream") {
+		var lastID int64
+		if req.Header.Get("Last-Event-Id") != "" {
+			i, err := strconv.Atoi(req.Header.Get("Last-Event-Id"))
+			if err != nil {
+				r.Error(ct.ValidationError{Field: "Last-Event-Id", Message: "is invalid"})
+				return
+			}
+			lastID = int64(i)
+		}
+		var previous int
+		if req.FormValue("previous") != "" {
+			var err error
+			previous, err = strconv.Atoi(req.FormValue("previous"))
+			if err != nil {
+				r.Error(ct.ValidationError{Field: "previous", Message: "is invalid"})
+				return
+			}
+		}
+		if err := streamJobs(w, app, repo, lastID, previous); err != nil {
+			r.Error(err)
+		}
+		return
+	}
 	list, err := repo.List(app.ID)
 	if err != nil {
 		r.Error(err)
@@ -159,6 +227,106 @@ func jobLog(req *http.Request, app *ct.App, params martini.Params, hc cluster.Ho
 	}
 }
 
+func streamJobs(w http.ResponseWriter, app *ct.App, repo *JobRepo, lastID int64, previous int) (err error) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+
+	sendKeepAlive := func() error {
+		if _, err := w.Write([]byte(":\n")); err != nil {
+			return err
+		}
+		w.(http.Flusher).Flush()
+		return nil
+	}
+	if err = sendKeepAlive(); err != nil {
+		return
+	}
+
+	sendJobEvent := func(e *ct.JobEvent) error {
+		if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: ", e.ID, e.State); err != nil {
+			return err
+		}
+		if err := json.NewEncoder(w).Encode(e); err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte("\n")); err != nil {
+			return err
+		}
+		w.(http.Flusher).Flush()
+		return nil
+	}
+
+	connected := make(chan struct{})
+	done := make(chan struct{})
+	listenEvent := func(ev pq.ListenerEventType, listenErr error) {
+		switch ev {
+		case pq.ListenerEventConnected:
+			close(connected)
+		case pq.ListenerEventDisconnected:
+			close(done)
+		case pq.ListenerEventConnectionAttemptFailed:
+			err = listenErr
+			close(done)
+		}
+	}
+	listener := pq.NewListener(repo.db.DSN(), 10*time.Second, time.Minute, listenEvent)
+	defer listener.Close()
+	listener.Listen("job_events:" + formatUUID(app.ID))
+
+	var currID int64
+	if lastID > 0 || previous > 0 {
+		events, err := repo.listEvents(app.ID, lastID, previous)
+		if err != nil {
+			return err
+		}
+		// events are in ID DESC order, so iterate in reverse
+		for i := len(events) - 1; i >= 0; i-- {
+			e := events[i]
+			if e.ID > currID {
+				currID = e.ID
+			}
+			if err := sendJobEvent(e); err != nil {
+				return err
+			}
+		}
+	}
+
+	select {
+	case <-done:
+		return
+	case <-connected:
+	}
+
+	closed := w.(http.CloseNotifier).CloseNotify()
+	for {
+		select {
+		case <-done:
+			return
+		case <-closed:
+			return
+		case <-time.After(30 * time.Second):
+			if err := sendKeepAlive(); err != nil {
+				return err
+			}
+		case n := <-listener.Notify:
+			i, err := strconv.Atoi(n.Extra)
+			if err != nil {
+				return err
+			}
+			id := int64(i)
+			if id < currID {
+				continue
+			}
+			e, err := repo.getEvent(id)
+			if err != nil {
+				return err
+			}
+			if err = sendJobEvent(e); err != nil {
+				return err
+			}
+		}
+	}
+}
+
 type SSELogWriter interface {
 	Stream(string) io.Writer
 }
@@ -229,6 +397,10 @@ func parseJobID(jobID string) (string, string) {
 		return "", ""
 	}
 	return id[0], id[1]
+}
+
+func formatUUID(s string) string {
+	return s[:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:]
 }
 
 func connectHostMiddleware(c martini.Context, params martini.Params, cl clusterClient, r ResponseHelper) {
