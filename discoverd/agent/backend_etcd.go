@@ -45,7 +45,7 @@ func (b *EtcdBackend) Subscribe(name string) (UpdateStream, error) {
 		newKeys := make(map[string]uint64)
 	sync:
 		for {
-			nextIndex := uint64(1)
+			nextIndex := uint64(0)
 			response, _ := b.getCurrentState(name)
 			if response != nil {
 				for _, n := range response.Node.Nodes {
