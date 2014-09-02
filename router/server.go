@@ -85,9 +85,13 @@ func main() {
 	}
 	etcdc := etcd.NewClient(etcdAddrs)
 
+	var prefix = os.Getenv("ETCD_PREFIX")
+	if prefix == "" {
+		prefix = "/router"
+	}
 	var r Router
-	r.TCP = NewTCPListener(*tcpIP, 0, 0, NewEtcdDataStore(etcdc, "/router/tcp/"), d)
-	r.HTTP = NewHTTPListener(*httpAddr, *httpsAddr, cookieKey, NewEtcdDataStore(etcdc, "/router/http/"), d)
+	r.TCP = NewTCPListener(*tcpIP, 0, 0, NewEtcdDataStore(etcdc, prefix+"/tcp/"), d)
+	r.HTTP = NewHTTPListener(*httpAddr, *httpsAddr, cookieKey, NewEtcdDataStore(etcdc, prefix+"/http/"), d)
 
 	go func() { log.Fatal(r.ListenAndServe(nil)) }()
 	log.Fatal(http.ListenAndServe(*apiAddr, apiHandler(&r)))
