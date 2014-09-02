@@ -10,7 +10,6 @@ import (
 	"errors"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -25,7 +24,10 @@ import (
 	"github.com/flynn/flynn/pkg/random"
 	"github.com/flynn/flynn/router/types"
 	"github.com/miracle2k/go-http-auth"
+	log "gopkg.in/inconshreveable/log15.v2"
 )
+
+var l = log.New("module", "app/server")
 
 type HTTPListener struct {
 	Watcher
@@ -346,6 +348,7 @@ func NewResponseMaker(req *http.Request, sc *httputil.ServerConn) *ResponseMaker
 	return rm
 }
 
+// TODO: create a new logger for the request, pass around..
 func (s *HTTPListener) handle(conn net.Conn, isTLS bool) {
 	defer conn.Close()
 
@@ -355,21 +358,25 @@ func (s *HTTPListener) handle(conn net.Conn, isTLS bool) {
 	// At this stage, if we don't find a match, we simply
 	// close the connection down.
 	if isTLS {
+		log.Debug("Going to determine domain via SNI")
+
 		// Parse out host via SNI first
 		vhostConn, err := vhost.TLS(conn)
 		if err != nil {
-			log.Println("Failed to decode TLS connection", err)
+			log.Warn("Failed to decode TLS connection", err)
 			return
 		}
 		host := vhostConn.Host()
+		log.Debug("SNI host of the request found", "host", host)
 
 		// Find a backend for the key
 		r = s.findRouteForHost(host)
 		if r == nil {
+			log.Debug("The domain is not configured in strowger", "host", host)
 			return
 		}
 		if r.keypair == nil {
-			log.Println("Cannot serve TLS, no certificate defined for this domain")
+			log.Info("Cannot serve TLS, no certificate defined for this domain")
 			return
 		}
 
@@ -378,12 +385,14 @@ func (s *HTTPListener) handle(conn net.Conn, isTLS bool) {
 		conn = tls.Server(vhostConn, tlscfg)
 	}
 
+	// Decode the first request from the connection
+	log.Debug("Going to read the first HTTP request")
 	sc := httputil.NewServerConn(conn, nil)
 	for {
 		req, err := sc.Read()
 		if err != nil {
 			if err != io.EOF && err != httputil.ErrPersistEOF {
-				log.Println("client read err:", err)
+				log.Error("Error reading client request", "err", err)
 			}
 			return
 		}
@@ -391,6 +400,7 @@ func (s *HTTPListener) handle(conn net.Conn, isTLS bool) {
 		if !isTLS {
 			r = s.findRouteForHost(req.Host)
 			if r == nil {
+				log.Debug("The domain is not configured in strowger", "host", req.Host)
 				fail(sc, req, 404, "Not Found")
 				continue
 			}
@@ -448,17 +458,16 @@ func (s *httpService) getBackend() *httputil.ClientConn {
 func (s *httpService) connectBackend() (*httputil.ClientConn, string) {
 	for _, addr := range shuffle(s.ss.Addrs()) {
 		// TODO: set connection timeout
+		log.Debug("Dialing the backend", "addr", addr)
 		backend, err := net.Dial("tcp", addr)
 		if err != nil {
-			// TODO: log error
 			// TODO: limit number of backends tried
 			// TODO: temporarily quarantine failing backends
-			log.Println("backend error", err)
+			log.Error("Error dialing the backend", "err", err)
 			continue
 		}
 		return httputil.NewClientConn(backend, nil), addr
 	}
-	// TODO: log no backends found error
 	return nil, ""
 }
 
@@ -522,6 +531,8 @@ func (s *httpService) getBackendSticky(req *http.Request) (*httputil.ClientConn,
 }
 
 func (s *httpService) handle(req *http.Request, sc *httputil.ServerConn, tls, sticky bool) (done bool) {
+	log.Debug("Begin: request is matched to service, try to process")
+
 	req.Header.Set("X-Request-Start", strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10))
 	req.Header.Set("X-Request-Id", random.UUID())
 
@@ -533,7 +544,7 @@ func (s *httpService) handle(req *http.Request, sc *httputil.ServerConn, tls, st
 		backend = s.getBackend()
 	}
 	if backend == nil {
-		log.Println("no backend found")
+		log.Warn("No backend for this service is online")
 		fail(sc, req, 503, "Service Unavailable")
 		return
 	}
@@ -568,7 +579,7 @@ func (s *httpService) handle(req *http.Request, sc *httputil.ServerConn, tls, st
 	// TODO: Set X-Forwarded-Port
 
 	if err := backend.Write(req); err != nil {
-		log.Println("server write err:", err)
+		log.Error("Error while writing to backend", "err", err)
 		// TODO: return error to client here
 		return true
 	}
@@ -582,16 +593,14 @@ func (s *httpService) handle(req *http.Request, sc *httputil.ServerConn, tls, st
 		}
 		if err := sc.Write(req, res); err != nil {
 			if err != io.EOF && err != httputil.ErrPersistEOF {
-				log.Println("client write err:", err)
-				// TODO: log error
+				log.Error("Error while writing response to client:", "err", err)
 			}
 			return true
 		}
 	}
 	if err != nil {
 		if err != io.EOF && err != httputil.ErrPersistEOF {
-			log.Println("server read err:", err)
-			// TODO: log error
+			log.Error("Error while reading response from backend:", "err", err)
 			fail(sc, req, 502, "Bad Gateway")
 		}
 		return
