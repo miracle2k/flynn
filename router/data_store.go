@@ -125,7 +125,7 @@ func (s *etcdDataStore) path(id string) string {
 func (s *etcdDataStore) Sync(h SyncHandler, started chan<- error) {
 	keys := make(map[string]uint64)
 	newKeys := make(map[string]uint64)
-	nextIndex := uint64(1)
+	nextIndex := uint64(0)
 
 fullSync:
 	data, err := s.etcd.Get(s.prefix, false, true)
