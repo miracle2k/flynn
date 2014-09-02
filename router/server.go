@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/coreos/go-etcd/etcd"
@@ -88,13 +89,14 @@ func main() {
 	}
 	etcdc := etcd.NewClient(etcdAddrs)
 
-	var prefix = os.Getenv("ETCD_PREFIX")
+	prefix := os.Getenv("ETCD_PREFIX")
 	if prefix == "" {
 		prefix = "/router"
 	}
 	var r Router
-	r.TCP = NewTCPListener(*tcpIP, 0, 0, NewEtcdDataStore(etcdc, prefix+"/tcp/"), d)
-	r.HTTP = NewHTTPListener(*httpAddr, *httpsAddr, cookieKey, NewEtcdDataStore(etcdc, prefix+"/http/"), d)
+	r.TCP = NewTCPListener(*tcpIP, 0, 0, NewEtcdDataStore(etcdc, path.Join(prefix, "tcp/")), d)
+	r.HTTP = NewHTTPListener(*httpAddr, *httpsAddr, cookieKey, NewEtcdDataStore(etcdc, path.Join(prefix, "http/")), d)
+
 
 	go func() { log.Crit("Failed to start server", "err", r.ListenAndServe(nil)) }()
 	log.Crit("Failed to start API server", "err", http.ListenAndServe(*apiAddr, apiHandler(&r)))
