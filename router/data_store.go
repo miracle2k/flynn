@@ -136,7 +136,7 @@ fullSync:
 	data, err := s.etcd.Get(s.prefix, false, true)
 	if e, ok := err.(*etcd.EtcdError); ok && e.ErrorCode == 100 {
 		nextIndex = e.Index + 1
-		dslog.Debug("No config in etcd, clear local map, watch")
+		s.log.Debug("No config in etcd, clear local map, watch")
 		for id := range keys {
 			delete(keys, id)
 			if err := h.Remove(id); err != nil {
@@ -182,6 +182,7 @@ syncErr:
 	}
 	keys = newKeys
 	newKeys = make(map[string]uint64)
+	s.log.Info("Fullsync with etcd complete, no watching", "routes", len(keys))
 
 watch:
 	if started != nil {
