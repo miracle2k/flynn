@@ -130,6 +130,7 @@ func (s *etcdDataStore) Sync(h SyncHandler, started chan<- error) {
 fullSync:
 	data, err := s.etcd.Get(s.prefix, false, true)
 	if e, ok := err.(*etcd.EtcdError); ok && e.ErrorCode == 100 {
+		nextIndex = e.Index + 1
 		// key not found, delete existing keys and then watch
 		for id := range keys {
 			delete(keys, id)
@@ -155,6 +156,7 @@ syncErr:
 	for _, node := range data.Node.Nodes {
 		key := path.Base(node.Key)
 		if modified, ok := keys[key]; ok && modified >= node.ModifiedIndex {
+			newKeys[key] = modified
 			continue
 		}
 		route := &router.Route{}

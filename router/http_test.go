@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -122,7 +124,7 @@ func (s *S) TestAddHTTPRoute(c *C) {
 	assertGet(c, "http://"+l.Addr, "example.com", "1")
 	assertGet(c, "https://"+l.TLSAddr, "example.com", "1")
 
-	discoverd.Unregister("test", srv1.Listener.Addr().String())
+	discoverdUnregister(c, discoverd, "test", srv1.Listener.Addr().String())
 	discoverdRegisterHTTP(c, l, srv2.Listener.Addr().String())
 
 	// Close the connection we just used to trigger a new backend choice
@@ -335,7 +337,8 @@ func (s *S) TestStickyHTTPRoute(c *C) {
 		c.Assert(resCookie, IsNil)
 		httpClient.Transport.(*http.Transport).CloseIdleConnections()
 	}
-	discoverd.Unregister("test", srv1.Listener.Addr().String())
+
+	discoverdUnregister(c, discoverd, "test", srv1.Listener.Addr().String())
 	for i := 0; i < 10; i++ {
 		resCookie := assertGetCookie(c, "http://"+l.Addr, "example.com", "2", cookie)
 		c.Assert(resCookie, Not(IsNil))
@@ -367,4 +370,32 @@ func (s *S) TestKeepaliveHostname(c *C) {
 
 	assertGet(c, "http://"+l.Addr, "example.com", "1")
 	assertGet(c, "http://"+l.Addr, "example.org", "2")
+}
+
+// issue #177
+func (s *S) TestRequestURIEscaping(c *C) {
+	l, discoverd := newHTTPListener(c)
+	defer l.Close()
+	var prefix string
+	uri := "/O08YqxVCf6KRJM6I8p594tzJizQ=/200x300/filters:no_upscale()/http://i.imgur.com/Wru0cNM.jpg?foo=bar"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		c.Assert(req.RequestURI, Equals, prefix+uri)
+	}))
+	defer srv.Close()
+
+	addHTTPRoute(c, l)
+
+	discoverdRegisterHTTP(c, l, srv.Listener.Addr().String())
+	defer discoverd.UnregisterAll()
+
+	for _, prefix = range []string{"", "http://example.com"} {
+		conn, err := net.Dial("tcp", l.Addr)
+		c.Assert(err, IsNil)
+		defer conn.Close()
+
+		fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: example.com\r\n\r\n", prefix+uri)
+		res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		c.Assert(err, IsNil)
+		c.Assert(res.StatusCode, Equals, 200)
+	}
 }
